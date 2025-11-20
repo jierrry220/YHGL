@@ -40,10 +40,22 @@ router.all('/', async (req, res) => {
                 await handleReward(req, res);
                 break;
             
+            case 'getUserInfo':
+                await handleGetUserInfo(req, res);
+                break;
+            
+            case 'setUsername':
+                await handleSetUsername(req, res);
+                break;
+            
+            case 'checkUsername':
+                await handleCheckUsername(req, res);
+                break;
+            
             default:
                 res.status(400).json({
                     success: false,
-                    error: 'Invalid action. Use: getBalance, deposit, withdraw, getTransactions, spend, reward'
+                    error: 'Invalid action. Use: getBalance, deposit, withdraw, getTransactions, spend, reward, getUserInfo, setUsername, checkUsername'
                 });
         }
     } catch (error) {
@@ -255,6 +267,133 @@ async function handleReward(req, res) {
             error: error.message
         });
     }
+}
+
+/**
+ * 获取用户信息
+ * GET ?action=getUserInfo&address=0x...
+ */
+async function handleGetUserInfo(req, res) {
+    const address = req.query.address;
+    
+    if (!address) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing address parameter'
+        });
+    }
+
+    const userInfo = gameBalanceManager.getUserInfo(address);
+    const balance = gameBalanceManager.getBalance(address);
+
+    if (!userInfo) {
+        return res.json({
+            success: true,
+            data: {
+                exists: false,
+                address: address.toLowerCase(),
+                balance: balance,
+                message: '用户未注册，请先进行首次充值'
+            }
+        });
+    }
+
+    res.json({
+        success: true,
+        data: {
+            exists: true,
+            uid: userInfo.uid,
+            address: userInfo.address,
+            username: userInfo.username,
+            hasUsername: !!userInfo.username,
+            balance: balance,
+            createdAt: userInfo.createdAt,
+            firstDepositAt: userInfo.firstDepositAt,
+            usernameSetAt: userInfo.usernameSetAt
+        }
+    });
+}
+
+/**
+ * 设置用户名
+ * POST ?action=setUsername
+ * Body: { address, username }
+ */
+async function handleSetUsername(req, res) {
+    if (req.method !== 'POST') {
+        return res.status(405).json({
+            success: false,
+            error: 'Method not allowed'
+        });
+    }
+
+    try {
+        const { address, username } = req.body;
+
+        if (!address || !username) {
+            return res.status(400).json({
+                success: false,
+                error: 'Missing required parameters: address, username'
+            });
+        }
+
+        const user = await gameBalanceManager.setUsername(address, username);
+
+        res.json({
+            success: true,
+            data: {
+                uid: user.uid,
+                address: user.address,
+                username: user.username,
+                usernameSetAt: user.usernameSetAt
+            }
+        });
+    } catch (error) {
+        res.status(400).json({
+            success: false,
+            error: error.message
+        });
+    }
+}
+
+/**
+ * 检查用户名是否可用
+ * GET ?action=checkUsername&username=xxx
+ */
+async function handleCheckUsername(req, res) {
+    const username = req.query.username;
+    
+    if (!username) {
+        return res.status(400).json({
+            success: false,
+            error: 'Missing username parameter'
+        });
+    }
+
+    // 验证格式
+    const validation = gameBalanceManager.validateUsername(username);
+    if (!validation.valid) {
+        return res.json({
+            success: true,
+            data: {
+                available: false,
+                reason: 'invalid_format',
+                error: validation.error
+            }
+        });
+    }
+
+    // 检查是否已被使用
+    const isTaken = gameBalanceManager.isUsernameTaken(validation.username);
+    
+    res.json({
+        success: true,
+        data: {
+            available: !isTaken,
+            reason: isTaken ? 'already_taken' : 'available',
+            username: validation.username
+        }
+    });
 }
 
 module.exports = router;

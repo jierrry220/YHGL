@@ -92,27 +92,49 @@ HDGL/
 GET /health
 ```
 
-### 查询余额
+### 余额管理
+
+**查询余额**
 ```
 GET /api/game-balance?action=getBalance&address=0x...
 ```
 
-### 充值
+**充值**
 ```
 POST /api/game-balance?action=deposit
 Body: { address, amount, txHash }
 ```
 
-### 提现
+**提现**
 ```
 POST /api/game-balance?action=withdraw
 Body: { address, amount }
 ```
 
-### 查询交易记录
+**查询交易记录**
 ```
 GET /api/game-balance?action=getTransactions&address=0x...&limit=50
 ```
+
+### 用户系统 🆕
+
+**获取用户信息**
+```
+GET /api/game-balance?action=getUserInfo&address=0x...
+```
+
+**设置用户名**
+```
+POST /api/game-balance?action=setUsername
+Body: { address, username }
+```
+
+**检查用户名可用性**
+```
+GET /api/game-balance?action=checkUsername&username=玩家123
+```
+
+> 📖 详细 API 文档请查看: [USER_SYSTEM_API.md](./USER_SYSTEM_API.md)
 
 ---
 
@@ -151,12 +173,27 @@ npm run dev
 
 ---
 
+## ✨ 新功能: 用户系统
+
+已集成完整的用户管理系统:
+
+- ✅ **自动 UID 生成**: 用户首次充值时自动生成唯一 UUID
+- ✅ **永久用户名**: 用户可设置一次永久用户名，不可修改
+- ✅ **老用户兼容**: 已充值用户在下次充值时自动创建用户记录
+- ✅ **用户名验证**: 支持字母、数字、下划线、中文，3-20字符
+- ✅ **多维度查询**: 支持通过地址、UID、用户名查询
+
+详细文档: [USER_SYSTEM_API.md](./USER_SYSTEM_API.md)
+
+---
+
 ## 📝 注意事项
 
 1. **Volume 必须配置**,否则数据会在重新部署时丢失
 2. **环境变量必须设置**,否则服务无法启动
 3. 每次推送到 GitHub 会自动重新部署
 4. Volume 中的数据会保留,不会丢失
+5. **用户名一旦设置不可修改**,请在前端明确提示
 
 ---
 

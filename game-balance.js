@@ -6,6 +6,7 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { ethers } = require('ethers');
+const { v4: uuidv4 } = require('uuid');
 const { depositVerifier } = require('./deposit-verifier');
 
 // 加载环境变量
@@ -35,6 +36,7 @@ class GameBalanceManager {
     constructor() {
         this.balances = {};
         this.transactions = [];
+        this.users = {}; // 用户信息: { address: { uid, username, createdAt, firstDepositAt } }
         this.provider = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URL);
     }
 
@@ -47,10 +49,12 @@ class GameBalanceManager {
             const parsed = JSON.parse(data);
             this.balances = parsed.balances || {};
             this.transactions = parsed.transactions || [];
+            this.users = parsed.users || {};
             
             const userCount = Object.keys(this.balances).length;
+            const registeredUserCount = Object.keys(this.users).length;
             const txCount = this.transactions.length;
-            console.log(`✅ 从 Volume 加载数据成功: ${userCount} 个用户, ${txCount} 条交易记录`);
+            console.log(`✅ 从 Volume 加载数据成功: ${registeredUserCount} 个注册用户, ${userCount} 个余额账户, ${txCount} 条交易记录`);
             console.log(`   文件: ${CONFIG.BALANCE_DB_PATH}`);
             console.log(`   最后更新: ${parsed.lastUpdate || '未知'}`);
         } catch (error) {
@@ -71,6 +75,7 @@ class GameBalanceManager {
         const data = {
             balances: this.balances,
             transactions: this.transactions,
+            users: this.users,
             lastUpdate: new Date().toISOString()
         };
         
@@ -83,6 +88,137 @@ class GameBalanceManager {
     getBalance(address) {
         const normalizedAddr = address.toLowerCase();
         return parseFloat(this.balances[normalizedAddr] || '0');
+    }
+
+    /**
+     * 生成唯一 UID
+     */
+    generateUID() {
+        return uuidv4();
+    }
+
+    /**
+     * 验证用户名格式
+     */
+    validateUsername(username) {
+        // 用户名规则: 3-20个字符，只允许字母、数字、下划线、中文
+        if (!username || typeof username !== 'string') {
+            return { valid: false, error: '用户名不能为空' };
+        }
+
+        const trimmed = username.trim();
+        
+        if (trimmed.length < 3 || trimmed.length > 20) {
+            return { valid: false, error: '用户名长度必须在3-20个字符之间' };
+        }
+
+        // 允许字母、数字、下划线、中文
+        const validPattern = /^[a-zA-Z0-9_\u4e00-\u9fa5]+$/;
+        if (!validPattern.test(trimmed)) {
+            return { valid: false, error: '用户名只能包含字母、数字、下划线和中文' };
+        }
+
+        return { valid: true, username: trimmed };
+    }
+
+    /**
+     * 检查用户名是否已被使用
+     */
+    isUsernameTaken(username) {
+        const normalizedUsername = username.toLowerCase();
+        return Object.values(this.users).some(
+            user => user.username && user.username.toLowerCase() === normalizedUsername
+        );
+    }
+
+    /**
+     * 创建用户（首次充值时调用）
+     */
+    async createUser(address) {
+        const normalizedAddr = address.toLowerCase();
+        
+        // 检查用户是否已存在
+        if (this.users[normalizedAddr]) {
+            return this.users[normalizedAddr];
+        }
+
+        // 创建新用户
+        const uid = this.generateUID();
+        const user = {
+            uid: uid,
+            address: normalizedAddr,
+            username: null, // 初始为null，等待用户设置
+            createdAt: new Date().toISOString(),
+            firstDepositAt: new Date().toISOString()
+        };
+
+        this.users[normalizedAddr] = user;
+        await this.save();
+
+        console.log(`👤 [用户创建] UID: ${uid}, 地址: ${normalizedAddr}`);
+        return user;
+    }
+
+    /**
+     * 设置用户名（只能设置一次）
+     */
+    async setUsername(address, username) {
+        const normalizedAddr = address.toLowerCase();
+        
+        // 1. 检查用户是否存在
+        const user = this.users[normalizedAddr];
+        if (!user) {
+            throw new Error('用户不存在，请先进行首次充值');
+        }
+
+        // 2. 检查是否已设置过用户名
+        if (user.username) {
+            throw new Error('用户名已设置，不可修改');
+        }
+
+        // 3. 验证用户名格式
+        const validation = this.validateUsername(username);
+        if (!validation.valid) {
+            throw new Error(validation.error);
+        }
+
+        // 4. 检查用户名是否已被占用
+        if (this.isUsernameTaken(validation.username)) {
+            throw new Error('该用户名已被使用');
+        }
+
+        // 5. 设置用户名
+        user.username = validation.username;
+        user.usernameSetAt = new Date().toISOString();
+        await this.save();
+
+        console.log(`✅ [用户名设置] UID: ${user.uid}, 用户名: ${validation.username}`);
+        return user;
+    }
+
+    /**
+     * 获取用户信息
+     */
+    getUserInfo(address) {
+        const normalizedAddr = address.toLowerCase();
+        return this.users[normalizedAddr] || null;
+    }
+
+    /**
+     * 通过 UID 获取用户信息
+     */
+    getUserByUID(uid) {
+        return Object.values(this.users).find(user => user.uid === uid) || null;
+    }
+
+    /**
+     * 通过用户名获取用户信息
+     */
+    getUserByUsername(username) {
+        const normalizedUsername = username.toLowerCase();
+        return Object.values(this.users).find(
+            user => user.username && user.username.toLowerCase() === normalizedUsername
+        ) || null;
     }
 
     /**
@@ -123,7 +259,29 @@ class GameBalanceManager {
         let verificationResult = null;
         let actualAmount = depositAmount;
 
-        // 3. 链上验证(除非跳过)
+        // 3. 检查用户是否存在，不存在则创建（兼容老用户）
+        let isFirstDeposit = false;
+        let isOldUserUpgrade = false;
+        
+        if (!this.users[normalizedAddr]) {
+            // 检查是否是老用户（有余额但没有用户记录）
+            const hasBalance = this.balances[normalizedAddr] && parseFloat(this.balances[normalizedAddr]) > 0;
+            const hasTransactions = this.transactions.some(tx => tx.address === normalizedAddr);
+            
+            if (hasBalance || hasTransactions) {
+                // 老用户，补充创建用户记录
+                await this.createUser(userAddress);
+                isOldUserUpgrade = true;
+                console.log('🔄 老用户升级，已补充创建用户账户');
+            } else {
+                // 真正的首次充值用户
+                await this.createUser(userAddress);
+                isFirstDeposit = true;
+                console.log('🎉 首次充值，已创建用户账户');
+            }
+        }
+
+        // 4. 链上验证(除非跳过)
         if (!skipVerification) {
             console.log('🔍 开始验证充值交易...');
             verificationResult = await depositVerifier.verify(txHash, userAddress, amount);
@@ -167,11 +325,11 @@ class GameBalanceManager {
             console.warn('⚠️  跳过验证模式 (仅用于管理员)');
         }
 
-        // 4. 更新余额
+        // 5. 更新余额
         const currentBalance = this.getBalance(userAddress);
         this.balances[normalizedAddr] = (currentBalance + actualAmount).toString();
 
-        // 5. 记录交易
+        // 6. 记录交易
         const transaction = {
             id: Date.now().toString(),
             type: 'deposit',
@@ -199,6 +357,9 @@ class GameBalanceManager {
 
         return {
             success: true,
+            isFirstDeposit: isFirstDeposit,
+            isOldUserUpgrade: isOldUserUpgrade,
+            user: this.users[normalizedAddr],
             newBalance: this.getBalance(userAddress),
             transaction,
             verification: verificationResult
