@@ -6,7 +6,6 @@
 const fs = require('fs').promises;
 const path = require('path');
 const { ethers } = require('ethers');
-const { v4: uuidv4 } = require('uuid');
 const { depositVerifier } = require('./deposit-verifier');
 
 // 加载环境变量
@@ -91,10 +90,31 @@ class GameBalanceManager {
     }
 
     /**
-     * 生成唯一 UID
+     * 生成唯一的 8 位数字 UID
      */
     generateUID() {
-        return uuidv4();
+        let uid;
+        let attempts = 0;
+        const maxAttempts = 100;
+        
+        do {
+            // 生成 10000000 到 99999999 之间的随机数（8位数字）
+            uid = Math.floor(10000000 + Math.random() * 90000000).toString();
+            attempts++;
+            
+            if (attempts >= maxAttempts) {
+                throw new Error('无法生成唯一 UID，请重试');
+            }
+        } while (this.isUIDTaken(uid)); // 检查是否已被使用
+        
+        return uid;
+    }
+
+    /**
+     * 检查 UID 是否已被使用
+     */
+    isUIDTaken(uid) {
+        return Object.values(this.users).some(user => user.uid === uid);
     }
 
     /**

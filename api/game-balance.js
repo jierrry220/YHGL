@@ -122,9 +122,12 @@ async function handleDeposit(req, res) {
             return res.json(result);
         }
 
-        // 成功时正常返回
+        // 成功时返回 - 将关键字段提升到顶层以便前端访问
         res.json({
             success: true,
+            isFirstDeposit: result.isFirstDeposit,
+            isOldUserUpgrade: result.isOldUserUpgrade,
+            user: result.user,
             data: result
         });
     } catch (error) {
