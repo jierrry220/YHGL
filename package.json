@@ -1,0 +1,28 @@
+{
+  "name": "debear-party-gamefi-backend",
+  "version": "1.0.0",
+  "description": "Debear Party GameFi 后端服务 - 用户余额管理、充值提现系统",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "test": "node test-api.js"
+  },
+  "keywords": [
+    "gamefi",
+    "berachain",
+    "blockchain",
+    "debear"
+  ],
+  "author": "Debear Party",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "ethers": "^5.7.2",
+    "express": "^4.21.2"
+  }
+}
