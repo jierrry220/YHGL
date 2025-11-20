@@ -205,6 +205,13 @@ class DepositVerifier {
             return rpcResult;
         }
 
+        // 如果是 pending 状态，直接返回，交给前端轮询，不尝试 API
+        if (rpcResult.pending) {
+            console.log('⏳ 交易确认中,请稍后重试');
+            console.log('==================================\n');
+            return rpcResult;
+        }
+
         console.log('⚠️  RPC 验证失败:', rpcResult.error);
 
         // 方法 2: API 验证 (备用方法)
