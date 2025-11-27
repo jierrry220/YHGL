@@ -186,9 +186,20 @@ class GameState {
                 survivors.push(player);
             }
         });
+        
+        // 计算Bot的总投注（被Bot的也要计入奖池）
+        let botKilledTotal = 0;
+        this.bots.forEach(bot => {
+            if (bot.roomId === this.targetRoom) {
+                botKilledTotal += bot.amount;
+            }
+        });
 
-        // 计算奖池（扣除平台费）
-        const prizePool = killedTotal * (1 - GAME_CONFIG.PLATFORM_FEE);
+        // 计算奖池（扣除平台费）- 包含玩家和Bot的投注
+        const totalKilled = killedTotal + botKilledTotal;
+        const prizePool = totalKilled * (1 - GAME_CONFIG.PLATFORM_FEE);
+        
+        console.log(`[结算] 被杀房间${this.targetRoom}, 玩家损失:${killedTotal.toFixed(0)}, Bot损失:${botKilledTotal.toFixed(0)}, 奖池:${prizePool.toFixed(0)}`);
         
         // 计算幸存者权重
         let totalWeight = 0;
