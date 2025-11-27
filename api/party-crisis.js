@@ -222,19 +222,21 @@ class GameState {
         const survivorResults = [];
         for (const player of survivors) {
             const weight = totalWeight > 0 ? player.amount / totalWeight : 0;
-            const reward = prizePool * weight;
+            const winnings = prizePool * weight; // 奖金部分
+            const totalReturn = player.amount + winnings; // 本金 + 奖金
             
-            // 更新玩家余额
+            // 更新玩家余额（返还本金 + 奖金）
             try {
                 await gameBalanceManager.addBalance(
                     player.address,
-                    reward,
+                    totalReturn,
                     'party_crisis_win',
                     {
                         gameId: this.gameId,
                         roomId: player.roomId,
                         bet: player.amount,
-                        reward: reward,
+                        winnings: winnings,
+                        totalReturn: totalReturn,
                         killedRoom: this.targetRoom
                     }
                 );
@@ -243,9 +245,11 @@ class GameState {
                     address: player.address,
                     username: player.username,
                     bet: player.amount,
-                    reward: reward,
-                    profit: reward - player.amount
+                    reward: totalReturn,
+                    profit: winnings
                 });
+                
+                console.log(`[结算] ${player.username} 获得: 本金${player.amount.toFixed(2)} + 奖金${winnings.toFixed(2)} = ${totalReturn.toFixed(2)} DP`);
             } catch (error) {
                 console.error(`[派对危机] 奖励分配失败 ${player.address}:`, error);
             }
