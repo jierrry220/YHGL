@@ -32,3 +32,12 @@ Thumbs.db
 # 临时文件
 tmp/
 temp/
+
+# 测试文件
+test-*.js
+add-test-*.js
+
+# TODO和临时文档
+*_TODO.md
+QUICK_FIX_GUIDE.md
+DEPLOYMENT_UPDATE.md
