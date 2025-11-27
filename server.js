@@ -40,13 +40,25 @@ app.get('/', (req, res) => {
         ready: isReady,
         endpoints: {
             health: '/health',
-            api: '/api/game-balance'
+            gameBalance: '/api/game-balance',
+            partyCrisis: '/api/party-crisis'
         }
     });
 });
 
 // 503 临时响应 - 服务初始化中
 app.all('/api/game-balance*', (req, res, next) => {
+    if (!isReady) {
+        return res.status(503).json({
+            success: false,
+            error: 'Service is starting up, please wait...',
+            details: initError ? initError.message : 'Initializing...'
+        });
+    }
+    next();
+});
+
+app.all('/api/party-crisis*', (req, res, next) => {
     if (!isReady) {
         return res.status(503).json({
             success: false,
@@ -93,8 +105,13 @@ async function initializeApp() {
         await gameBalanceManager.init();
         console.log('✓ Balance manager initialized');
         
+        // 加载派对危机 API
+        const partyCrisisAPI = require('./api/party-crisis');
+        console.log('✓ Party Crisis API loaded');
+        
         // 注册路由
         app.use('/api/game-balance', gameBalanceAPI);
+        app.use('/api/party-crisis', partyCrisisAPI);
         console.log('✓ Routes registered');
         
         // 404 处理 - 必须在路由注册之后
@@ -106,6 +123,7 @@ async function initializeApp() {
         console.log('='.repeat(50));
         console.log('✅ APPLICATION READY');
         console.log('🎮 Game balance API is now available');
+        console.log('🎲 Party Crisis API is now available');
         console.log('='.repeat(50));
         
     } catch (error) {

@@ -425,6 +425,13 @@ class GameBalanceManager {
     }
 
     /**
+     * subtractBalance - spend 的别名，为了兼容性
+     */
+    async subtractBalance(userAddress, amount, gameId, metadata = {}) {
+        return await this.spend(userAddress, amount, gameId, JSON.stringify(metadata));
+    }
+
+    /**
      * 游戏奖励 - 增加用户余额
      */
     async reward(userAddress, amount, gameId, description = '') {
@@ -455,6 +462,13 @@ class GameBalanceManager {
             newBalance: this.getBalance(userAddress),
             transaction
         };
+    }
+
+    /**
+     * addBalance - reward 的别名，为了兼容性
+     */
+    async addBalance(userAddress, amount, gameId, metadata = {}) {
+        return await this.reward(userAddress, amount, gameId, JSON.stringify(metadata));
     }
 
     /**
