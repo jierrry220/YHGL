@@ -22,7 +22,6 @@ const GAME_CONFIG = {
     KILLER_DURATION: 15, // 杀手阶段15秒（9秒前往+1秒刺杀+4秒撤退+1秒缓冲）
     SETTLING_DURATION: 6, // 结算阶段6秒（显示结果）
     MIN_BET: 1,
-    MAX_BET: 500,
     MIN_PLAYERS: 1, // 最少1人即可开始（包含bot）
     MAX_PLAYERS: 200,
     PLATFORM_FEE: 0.10, // 10%平台费
@@ -530,7 +529,6 @@ router.get('/status', (req, res) => {
                 killerDuration: GAME_CONFIG.KILLER_DURATION,
                 settlingDuration: GAME_CONFIG.SETTLING_DURATION,
                 minBet: GAME_CONFIG.MIN_BET,
-                maxBet: GAME_CONFIG.MAX_BET,
                 platformFee: GAME_CONFIG.PLATFORM_FEE
             }
         });
@@ -567,10 +565,10 @@ router.post('/bet', async (req, res) => {
             });
         }
 
-        if (!amount || amount < GAME_CONFIG.MIN_BET || amount > GAME_CONFIG.MAX_BET) {
+        if (!amount || amount < GAME_CONFIG.MIN_BET) {
             return res.status(400).json({
                 success: false,
-                error: `投注金额必须在 ${GAME_CONFIG.MIN_BET}-${GAME_CONFIG.MAX_BET} DP 之间`
+                error: `投注金额必须大于 ${GAME_CONFIG.MIN_BET} DP`
             });
         }
 
