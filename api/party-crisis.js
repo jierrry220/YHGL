@@ -201,13 +201,24 @@ class GameState {
         
         console.log(`[结算] 被杀房间${this.targetRoom}, 玩家损失:${killedTotal.toFixed(0)}, Bot损失:${botKilledTotal.toFixed(0)}, 奖池:${prizePool.toFixed(0)}`);
         
-        // 计算幸存者权重
+        // 计算幸存者权重（包括玩家和Bot）
         let totalWeight = 0;
+        
+        // 统计玩家权重
         survivors.forEach(player => {
             totalWeight += player.amount;
         });
+        
+        // 统计Bot权重
+        this.bots.forEach(bot => {
+            if (bot.roomId !== this.targetRoom) {
+                totalWeight += bot.amount;
+            }
+        });
+        
+        console.log(`[结算] 幸存玩家:${survivors.length}人, 总权重:${totalWeight.toFixed(0)} DP`);
 
-        // 分配奖励
+        // 分配奖励（只给真实玩家发放，Bot的奖金作为平台收入）
         const survivorResults = [];
         for (const player of survivors) {
             const weight = totalWeight > 0 ? player.amount / totalWeight : 0;
