@@ -37,6 +37,7 @@ class GameBalanceManager {
         this.transactions = [];
         this.users = {}; // 用户信息: { address: { uid, username, createdAt, firstDepositAt } }
         this.provider = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URL);
+        this.locks = new Map(); // 用于防止并发请求的锁机制
     }
 
     /**
@@ -62,6 +63,29 @@ class GameBalanceManager {
             console.log(`   文件: ${CONFIG.BALANCE_DB_PATH}`);
             await this.save();
         }
+    }
+
+    /**
+     * 获取锁 - 防止同一用户的并发操作
+     */
+    async acquireLock(address) {
+        const normalizedAddr = address.toLowerCase();
+        
+        // 等待直到获取到锁
+        while (this.locks.has(normalizedAddr)) {
+            await new Promise(resolve => setTimeout(resolve, 10)); // 等待10ms
+        }
+        
+        // 获取锁
+        this.locks.set(normalizedAddr, Date.now());
+    }
+    
+    /**
+     * 释放锁
+     */
+    releaseLock(address) {
+        const normalizedAddr = address.toLowerCase();
+        this.locks.delete(normalizedAddr);
     }
 
     /**
@@ -393,35 +417,43 @@ class GameBalanceManager {
         const normalizedAddr = userAddress.toLowerCase();
         const spendAmount = parseFloat(amount);
 
-        // 检查余额
-        const currentBalance = this.getBalance(userAddress);
-        if (currentBalance < spendAmount) {
-            throw new Error('余额不足');
+        // 获取锁，防止并发请求
+        await this.acquireLock(normalizedAddr);
+        
+        try {
+            // 检查余额（在锁保护下进行）
+            const currentBalance = this.getBalance(userAddress);
+            if (currentBalance < spendAmount) {
+                throw new Error('余额不足');
+            }
+
+            // 扣除余额
+            this.balances[normalizedAddr] = (currentBalance - spendAmount).toString();
+
+            // 记录交易
+            const transaction = {
+                id: Date.now().toString(),
+                type: 'spend',
+                address: normalizedAddr,
+                amount: spendAmount,
+                gameId: gameId,
+                description: description,
+                timestamp: Math.floor(Date.now() / 1000),
+                status: 'completed'
+            };
+            this.transactions.push(transaction);
+
+            await this.save();
+
+            return {
+                success: true,
+                newBalance: this.getBalance(userAddress),
+                transaction
+            };
+        } finally {
+            // 确保无论成功或失败都释放锁
+            this.releaseLock(normalizedAddr);
         }
-
-        // 扣除余额
-        this.balances[normalizedAddr] = (currentBalance - spendAmount).toString();
-
-        // 记录交易
-        const transaction = {
-            id: Date.now().toString(),
-            type: 'spend',
-            address: normalizedAddr,
-            amount: spendAmount,
-            gameId: gameId,
-            description: description,
-            timestamp: Math.floor(Date.now() / 1000),
-            status: 'completed'
-        };
-        this.transactions.push(transaction);
-
-        await this.save();
-
-        return {
-            success: true,
-            newBalance: this.getBalance(userAddress),
-            transaction
-        };
     }
 
     /**
