@@ -41,7 +41,8 @@ app.get('/', (req, res) => {
         endpoints: {
             health: '/health',
             gameBalance: '/api/game-balance',
-            partyCrisis: '/api/party-crisis'
+            partyCrisis: '/api/party-crisis',
+            admin: '/api/admin'
         }
     });
 });
@@ -109,9 +110,18 @@ async function initializeApp() {
         const partyCrisisAPI = require('./api/party-crisis');
         console.log('✓ Party Crisis API loaded');
         
+        // 加载管理员 API
+        const { router: adminAPI, initPartyCrisisRef } = require('./api/admin');
+        console.log('✓ Admin API loaded');
+        
+        // 初始化管理员API的Party Crisis引用
+        initPartyCrisisRef(partyCrisisAPI.games, partyCrisisAPI.playerGames, partyCrisisAPI.globalHistory);
+        console.log('✓ Admin API initialized');
+        
         // 注册路由
         app.use('/api/game-balance', gameBalanceAPI);
         app.use('/api/party-crisis', partyCrisisAPI);
+        app.use('/api/admin', adminAPI);
         console.log('✓ Routes registered');
         
         // 404 处理 - 必须在路由注册之后
@@ -124,6 +134,7 @@ async function initializeApp() {
         console.log('✅ APPLICATION READY');
         console.log('🎮 Game balance API is now available');
         console.log('🎲 Party Crisis API is now available');
+        console.log('🛡️  Admin API is now available');
         console.log('='.repeat(50));
         
     } catch (error) {

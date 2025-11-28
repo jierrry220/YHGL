@@ -87,6 +87,7 @@ class GameState {
         this.bots = []; // Bot玩家（动态添加）
         this.botTargets = {}; // 每个房间的目标投注量
         this.targetRoom = null;
+        this.adminTargetRoom = null; // 管理员指定的目标房间
         this.startTime = Date.now();
         this.endTime = null;
         this.result = null; // 结算结果
@@ -157,9 +158,16 @@ class GameState {
     }
 
     selectTargetRoom() {
-        // 随机选择目标房间
-        this.targetRoom = Math.floor(Math.random() * 8) + 1;
-        console.log(`[杀手阶段] 目标房间: ${this.targetRoom} (${ROOMS[this.targetRoom]?.name})`);
+        // 如果管理员设置了目标房间，使用管理员设置的
+        if (this.adminTargetRoom) {
+            this.targetRoom = this.adminTargetRoom;
+            console.log(`[杀手阶段] 管理员指定目标房间: ${this.targetRoom} (${ROOMS[this.targetRoom]?.name})`);
+            this.adminTargetRoom = null; // 清除管理员设置
+        } else {
+            // 随机选择目标房间
+            this.targetRoom = Math.floor(Math.random() * 8) + 1;
+            console.log(`[杀手阶段] 随机目标房间: ${this.targetRoom} (${ROOMS[this.targetRoom]?.name})`);
+        }
         return this.targetRoom;
     }
 
@@ -731,3 +739,7 @@ setInterval(() => {
 }, 5 * 60 * 1000);
 
 module.exports = router;
+module.exports.games = games;
+module.exports.playerGames = playerGames;
+module.exports.globalHistory = globalHistory;
+module.exports.ROOMS = ROOMS;
