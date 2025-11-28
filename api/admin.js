@@ -294,7 +294,8 @@ router.get('/party-crisis/current', verifyAdmin, (req, res) => {
                 phase: game.phase,
                 countdown: game.countdown,
                 targetRoom: game.targetRoom,
-                canControlTarget: game.phase === 'betting' && game.countdown <= 2, // 倒计时2秒内可控制
+                adminTargetRoom: game.adminTargetRoom, // 管理员已设置的目标房间
+                canControlTarget: game.phase === 'betting', // 整个投注阶段都可控制
                 roomDetails: roomDetails,
                 totalPlayers: game.players.size,
                 totalBots: game.bots.length
@@ -334,11 +335,11 @@ router.post('/party-crisis/set-target', verifyAdmin, (req, res) => {
         
         const game = Array.from(partyCrisisGames.values())[0];
         
-        // 只允许在投注阶段且倒计时2秒内设置
-        if (game.phase !== 'betting' || game.countdown > 2) {
+        // 只允许在投注阶段设置
+        if (game.phase !== 'betting') {
             return res.status(400).json({
                 success: false,
-                error: '只能在投注阶段倒计时2秒内设置目标房间'
+                error: '只能在投注阶段设置目标房间'
             });
         }
         
