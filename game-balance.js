@@ -7,6 +7,7 @@ const fs = require('fs').promises;
 const path = require('path');
 const { ethers } = require('ethers');
 const { depositVerifier } = require('./deposit-verifier');
+const { withdrawSecurityManager } = require('./withdraw-security');
 
 // 加载环境变量
 require('dotenv').config();
@@ -34,6 +35,7 @@ const DP_TOKEN_ABI = [
 class GameBalanceManager {
     constructor() {
         this.balances = {};
+        this.frozenBalances = {}; // 冻结的余额（等待审核的提现金额）
         this.transactions = [];
         this.users = {}; // 用户信息: { address: { uid, username, createdAt, firstDepositAt } }
         this.provider = new ethers.providers.JsonRpcProvider(CONFIG.RPC_URL);
@@ -48,6 +50,7 @@ class GameBalanceManager {
             const data = await fs.readFile(CONFIG.BALANCE_DB_PATH, 'utf-8');
             const parsed = JSON.parse(data);
             this.balances = parsed.balances || {};
+            this.frozenBalances = parsed.frozenBalances || {};
             this.transactions = parsed.transactions || [];
             this.users = parsed.users || {};
             
@@ -63,6 +66,9 @@ class GameBalanceManager {
             console.log(`   文件: ${CONFIG.BALANCE_DB_PATH}`);
             await this.save();
         }
+        
+        // 初始化提现安全管理器
+        await withdrawSecurityManager.init();
     }
 
     /**
@@ -97,6 +103,7 @@ class GameBalanceManager {
         
         const data = {
             balances: this.balances,
+            frozenBalances: this.frozenBalances,
             transactions: this.transactions,
             users: this.users,
             lastUpdate: new Date().toISOString()
@@ -106,11 +113,68 @@ class GameBalanceManager {
     }
 
     /**
-     * 获取用户余额
+     * 获取用户余额（总余额）
      */
     getBalance(address) {
         const normalizedAddr = address.toLowerCase();
         return parseFloat(this.balances[normalizedAddr] || '0');
+    }
+    
+    /**
+     * 获取冻结余额
+     */
+    getFrozenBalance(address) {
+        const normalizedAddr = address.toLowerCase();
+        return parseFloat(this.frozenBalances[normalizedAddr] || '0');
+    }
+    
+    /**
+     * 获取可用余额（总余额 - 冻结余额）
+     */
+    getAvailableBalance(address) {
+        return this.getBalance(address) - this.getFrozenBalance(address);
+    }
+    
+    /**
+     * 冻结余额（提现申请时调用）
+     */
+    async freezeBalance(address, amount) {
+        const normalizedAddr = address.toLowerCase();
+        const freezeAmount = parseFloat(amount);
+        
+        const currentFrozen = this.getFrozenBalance(address);
+        this.frozenBalances[normalizedAddr] = (currentFrozen + freezeAmount).toString();
+        await this.save();
+    }
+    
+    /**
+     * 解冻余额（审核拒绝时调用）
+     */
+    async unfreezeBalance(address, amount) {
+        const normalizedAddr = address.toLowerCase();
+        const unfreezeAmount = parseFloat(amount);
+        
+        const currentFrozen = this.getFrozenBalance(address);
+        this.frozenBalances[normalizedAddr] = Math.max(0, currentFrozen - unfreezeAmount).toString();
+        await this.save();
+    }
+    
+    /**
+     * 扣除冻结余额和总余额（审核通过时调用）
+     */
+    async deductFrozenBalance(address, amount) {
+        const normalizedAddr = address.toLowerCase();
+        const deductAmount = parseFloat(amount);
+        
+        // 扣除冻结余额
+        const currentFrozen = this.getFrozenBalance(address);
+        this.frozenBalances[normalizedAddr] = Math.max(0, currentFrozen - deductAmount).toString();
+        
+        // 扣除总余额
+        const currentBalance = this.getBalance(address);
+        this.balances[normalizedAddr] = (currentBalance - deductAmount).toString();
+        
+        await this.save();
     }
 
     /**
@@ -325,7 +389,10 @@ class GameBalanceManager {
             }
         }
 
-        // 4. 链上验证(除非跳过)
+        // 4. 记录充值到安全管理器（用于计算提现/充值比例）
+        await withdrawSecurityManager.recordDeposit(userAddress, actualAmount);
+        
+        // 5. 链上验证(除非跳过)
         if (!skipVerification) {
             console.log('🔍 开始验证充值交易...');
             verificationResult = await depositVerifier.verify(txHash, userAddress, amount);
@@ -369,11 +436,11 @@ class GameBalanceManager {
             console.warn('⚠️  跳过验证模式 (仅用于管理员)');
         }
 
-        // 5. 更新余额
+        // 6. 更新余额
         const currentBalance = this.getBalance(userAddress);
         this.balances[normalizedAddr] = (currentBalance + actualAmount).toString();
 
-        // 6. 记录交易
+        // 7. 记录交易
         const transaction = {
             id: Date.now().toString(),
             type: 'deposit',
@@ -421,11 +488,14 @@ class GameBalanceManager {
         await this.acquireLock(normalizedAddr);
         
         try {
-            // 检查余额（在锁保护下进行）
-            const currentBalance = this.getBalance(userAddress);
-            if (currentBalance < spendAmount) {
-                throw new Error('余额不足');
+            // 检查可用余额（总余额 - 冻结余额）
+            const availableBalance = this.getAvailableBalance(userAddress);
+            if (availableBalance < spendAmount) {
+                const frozenBalance = this.getFrozenBalance(userAddress);
+                throw new Error(`可用余额不足（当前有 ${frozenBalance.toFixed(2)} DP 被冻结中，等待提现审核）`);
             }
+            
+            const currentBalance = this.getBalance(userAddress);
 
             // 扣除余额
             this.balances[normalizedAddr] = (currentBalance - spendAmount).toString();
@@ -504,30 +574,95 @@ class GameBalanceManager {
     }
 
     /**
-     * 提现 - 用户将游戏余额提现到钱包
+     * 提现 - 用户将游戏余额提现到钱包（带安全检查和人工审核）
      */
     async withdraw(userAddress, amount) {
         const normalizedAddr = userAddress.toLowerCase();
         const withdrawAmount = parseFloat(amount);
 
-        // 验证金额
-        if (withdrawAmount < CONFIG.MIN_WITHDRAW) {
-            throw new Error(`提现金额不能小于 ${CONFIG.MIN_WITHDRAW} DP`);
-        }
-
-        // 检查余额
-        const currentBalance = this.getBalance(userAddress);
-        if (currentBalance < withdrawAmount) {
-            throw new Error('余额不足');
-        }
-
-        // 检查平台钱包配置
-        if (!CONFIG.PLATFORM_PRIVATE_KEY) {
-            throw new Error('平台钱包未配置');
-        }
-
+        // 获取锁
+        await withdrawSecurityManager.acquireLock(normalizedAddr);
+        
         try {
-            // 执行链上转账
+            // 1. 验证金额
+            if (withdrawAmount < CONFIG.MIN_WITHDRAW) {
+                throw new Error(`提现金额不能小于 ${CONFIG.MIN_WITHDRAW} DP`);
+            }
+
+            // 2. 检查可用余额（方案3：防止冻结期间使用余额）
+            const availableBalance = this.getAvailableBalance(userAddress);
+            const frozenBalance = this.getFrozenBalance(userAddress);
+            if (availableBalance < withdrawAmount) {
+                throw new Error(`可用余额不足（当前有 ${frozenBalance.toFixed(2)} DP 被冻结中，等待提现审核）`);
+            }
+            
+            const currentBalance = this.getBalance(userAddress);
+
+            // 3. 方案1：检查是否有待审核的提现
+            const hasPendingReview = await withdrawSecurityManager.hasPendingWithdraw(userAddress);
+            if (hasPendingReview) {
+                throw new Error('您有一笔提现申请正在审核中，请等待审核完成后再提交新申请');
+            }
+
+            // 4. 安全检查：冷却时间、每日限额等
+            const userTransactions = this.getTransactions(userAddress, 100);
+            const securityCheck = await withdrawSecurityManager.checkWithdrawAllowed(
+                userAddress, 
+                withdrawAmount,
+                userTransactions
+            );
+
+            if (!securityCheck.allowed) {
+                throw new Error(securityCheck.reason);
+            }
+
+            // 5. 异常检测 - 需要人工审核
+            if (securityCheck.needsReview) {
+                // 方案3：冻结提现金额
+                await this.freezeBalance(userAddress, withdrawAmount);
+                
+                const userInfo = this.getUserInfo(userAddress);
+                const review = await withdrawSecurityManager.createPendingReview(
+                    userAddress,
+                    withdrawAmount,
+                    securityCheck.reviewReason,
+                    {
+                        currentBalance: currentBalance,
+                        frozenBalance: withdrawAmount,
+                        userInfo: userInfo
+                    }
+                );
+
+                // 记录待审核交易
+                const transaction = {
+                    id: Date.now().toString(),
+                    type: 'withdraw',
+                    address: normalizedAddr,
+                    amount: withdrawAmount,
+                    reviewId: review.id,
+                    timestamp: Math.floor(Date.now() / 1000),
+                    status: 'pending_review',
+                    frozen: true
+                };
+                this.transactions.push(transaction);
+                await this.save();
+
+                return {
+                    success: false,
+                    pending_review: true,
+                    reviewId: review.id,
+                    reason: securityCheck.reviewReason,
+                    message: '您的提现申请需要人工审核，请耐心等待',
+                    transaction
+                };
+            }
+
+            // 5. 检查平台钱包配置
+            if (!CONFIG.PLATFORM_PRIVATE_KEY) {
+                throw new Error('平台钱包未配置');
+            }
+
+            // 6. 执行链上转账
             const wallet = new ethers.Wallet(CONFIG.PLATFORM_PRIVATE_KEY, this.provider);
             const dpToken = new ethers.Contract(CONFIG.DP_TOKEN, DP_TOKEN_ABI, wallet);
             
@@ -535,10 +670,13 @@ class GameBalanceManager {
             const tx = await dpToken.transfer(userAddress, amountWei);
             await tx.wait();
 
-            // 扣除余额
+            // 7. 扣除余额
             this.balances[normalizedAddr] = (currentBalance - withdrawAmount).toString();
 
-            // 记录交易
+            // 8. 记录成功的提现
+            await withdrawSecurityManager.recordWithdrawSuccess(userAddress, withdrawAmount);
+
+            // 9. 记录交易
             const transaction = {
                 id: Date.now().toString(),
                 type: 'withdraw',
@@ -552,6 +690,8 @@ class GameBalanceManager {
 
             await this.save();
 
+            console.log(`✅ [提现成功] 地址: ${normalizedAddr}, 金额: ${withdrawAmount} DP, TxHash: ${tx.hash}`);
+
             return {
                 success: true,
                 newBalance: this.getBalance(userAddress),
@@ -559,8 +699,110 @@ class GameBalanceManager {
                 transaction
             };
         } catch (error) {
-            console.error('提现失败:', error);
-            throw new Error('提现失败: ' + error.message);
+            console.error('❌ [提现失败]', error);
+            
+            // 记录失败交易
+            const failedTransaction = {
+                id: Date.now().toString(),
+                type: 'withdraw',
+                address: normalizedAddr,
+                amount: withdrawAmount,
+                timestamp: Math.floor(Date.now() / 1000),
+                status: 'failed',
+                error: error.message
+            };
+            this.transactions.push(failedTransaction);
+            await this.save();
+            
+            throw error;
+        } finally {
+            // 释放锁
+            withdrawSecurityManager.releaseLock(normalizedAddr);
+        }
+    }
+    
+    /**
+     * 执行已审核通过的提现（由管理员触发）
+     */
+    async executeApprovedWithdraw(reviewId) {
+        const review = withdrawSecurityManager.pendingReviews.find(r => r.id === reviewId);
+        
+        if (!review) {
+            throw new Error('审核记录不存在');
+        }
+        
+        if (review.status !== 'approved') {
+            throw new Error('该提现未通过审核');
+        }
+        
+        const { address, amount } = review;
+        const normalizedAddr = address.toLowerCase();
+        
+        // 方案2：批准时再次检查余额
+        const currentBalance = this.getBalance(address);
+        if (currentBalance < amount) {
+            // 余额不足，自动拒绝并解冻
+            await this.unfreezeBalance(address, amount);
+            
+            // 更新审核状态
+            review.status = 'rejected';
+            review.reviewedAt = Date.now();
+            review.reviewNote = '系统自动拒绝：余额不足';
+            await withdrawSecurityManager.save();
+            
+            // 更新交易状态
+            const pendingTx = this.transactions.find(t => t.reviewId === reviewId);
+            if (pendingTx) {
+                pendingTx.status = 'rejected';
+                pendingTx.rejectedAt = Math.floor(Date.now() / 1000);
+                pendingTx.rejectReason = '余额不足';
+            }
+            await this.save();
+            
+            throw new Error('余额不足，已自动拒绝并解冻余额');
+        }
+        
+        // 检查平台钱包配置
+        if (!CONFIG.PLATFORM_PRIVATE_KEY) {
+            throw new Error('平台钱包未配置');
+        }
+        
+        try {
+            // 执行链上转账
+            const wallet = new ethers.Wallet(CONFIG.PLATFORM_PRIVATE_KEY, this.provider);
+            const dpToken = new ethers.Contract(CONFIG.DP_TOKEN, DP_TOKEN_ABI, wallet);
+            
+            const amountWei = ethers.utils.parseEther(amount.toString());
+            const tx = await dpToken.transfer(address, amountWei);
+            await tx.wait();
+
+            // 方案3：扣除冻结余额和总余额
+            await this.deductFrozenBalance(address, amount);
+
+            // 记录成功的提现
+            await withdrawSecurityManager.recordWithdrawSuccess(address, amount);
+
+            // 更新交易状态
+            const pendingTx = this.transactions.find(t => t.reviewId === reviewId);
+            if (pendingTx) {
+                pendingTx.status = 'completed';
+                pendingTx.txHash = tx.hash;
+                pendingTx.completedAt = Math.floor(Date.now() / 1000);
+            }
+
+            await this.save();
+
+            console.log(`✅ [审核提现执行成功] ReviewID: ${reviewId}, 金额: ${amount} DP, TxHash: ${tx.hash}`);
+
+            return {
+                success: true,
+                newBalance: this.getBalance(address),
+                txHash: tx.hash,
+                reviewId: reviewId
+            };
+        } catch (error) {
+            console.error('❌ [审核提现执行失败]', error);
+            throw new Error('执行提现失败: ' + error.message);
         }
     }
 

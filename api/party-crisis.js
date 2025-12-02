@@ -30,6 +30,8 @@ const GAME_CONFIG = {
     BOT_COUNT_MAX: 90,
     ROOM_BET_MIN: 4200, // 每个房间最小投注（降低到80个Bot）
     ROOM_BET_MAX: 5800, // 每个房间最大投注（降低到80个Bot）
+    BOT_BET_MIN: 50, // 单个Bot最小投注额
+    BOT_BET_MAX: 600, // 单个Bot最大投注额
     TARGET_ODDS_MIN: 1.08, // 预期赔率下限
     TARGET_ODDS_MAX: 1.22, // 预期赔率上限
 };
@@ -370,10 +372,10 @@ function addBotBatch(game) {
             amount = Math.floor(range * (0.5 + randomFactor1));
         }
         
-        // 最终投注量：50-600 DP（增加上限以减少Bot数量）
+        // 最终投注量：使用配置的BOT_BET_MIN和BOT_BET_MAX
         // 再加一层随机扰动
-        const finalNoise = Math.floor(Math.random() * 40 - 20); // -20刃20
-        let finalAmount = Math.max(50, Math.min(600, amount + finalNoise));
+        const finalNoise = Math.floor(Math.random() * 40 - 20); // -20到20
+        let finalAmount = Math.max(GAME_CONFIG.BOT_BET_MIN, Math.min(GAME_CONFIG.BOT_BET_MAX, amount + finalNoise));
         
         // 确保不是整十整百数（个位不为0）
         if (finalAmount % 10 === 0) {
@@ -521,6 +523,34 @@ function startGameTimer(game) {
 
 // ==================== API 路由 ====================
 
+// 用户下注请求锁 - 防止并发下注
+const betLocks = new Map(); // address -> Promise
+
+/**
+ * 获取用户的下注锁，确保同一用户的下注请求串行处理
+ */
+function acquireBetLock(address) {
+    if (betLocks.has(address)) {
+        // 用户有正在处理的下注请求
+        return null;
+    }
+    
+    // 创建锁
+    const lock = { released: false };
+    const promise = new Promise((resolve) => {
+        lock.release = () => {
+            if (!lock.released) {
+                lock.released = true;
+                betLocks.delete(address);
+                resolve();
+            }
+        };
+    });
+    
+    betLocks.set(address, promise);
+    return lock;
+}
+
 /**
  * GET /api/party-crisis/status
  * 获取当前游戏状态
@@ -555,6 +585,9 @@ router.get('/status', (req, res) => {
  * Body: { address, roomId, amount }
  */
 router.post('/bet', async (req, res) => {
+    const startTime = Date.now();
+    let lock = null;
+    
     try {
         const { address, roomId, amount } = req.body;
 
@@ -582,12 +615,21 @@ router.post('/bet', async (req, res) => {
 
         const normalizedAddr = address.toLowerCase();
 
-        // 检查余额 - 重新加载以获取最新数据
-        await gameBalanceManager.init();
+        // 获取下注锁 - 防止并发下注
+        lock = acquireBetLock(normalizedAddr);
+        if (!lock) {
+            return res.status(429).json({
+                success: false,
+                error: '请求过快，请稍后再试'
+            });
+        }
+
+        // 检查余额 - 使用内存中的数据，不重新加载
         const balance = gameBalanceManager.getBalance(normalizedAddr);
-        console.log(`[派对危机] 检查余额: ${normalizedAddr}, 当前余额: ${balance}, 需要: ${amount}`);
+        console.log(`[派对危机] 下注请求: ${normalizedAddr.slice(0, 10)}..., 余额: ${balance}, 需要: ${amount}`);
         
         if (balance < amount) {
+            lock.release();
             return res.status(400).json({
                 success: false,
                 error: `余额不足，当前余额: ${balance} DP，需要: ${amount} DP`
@@ -613,6 +655,7 @@ router.post('/bet', async (req, res) => {
         const game = getCurrentGame();
         
         if (game.phase !== 'betting') {
+            lock.release();
             return res.status(400).json({
                 success: false,
                 error: '当前不在投注阶段'
@@ -622,7 +665,11 @@ router.post('/bet', async (req, res) => {
         game.addPlayer(normalizedAddr, roomId, amount, username);
         playerGames.set(normalizedAddr, game.gameId);
 
-        console.log(`[派对危机] 玩家下注: ${normalizedAddr}, 房间${roomId}, ${amount} DP`);
+        const duration = Date.now() - startTime;
+        console.log(`[派对危机] 下注成功: ${normalizedAddr.slice(0, 10)}..., 房间${roomId}, ${amount} DP (耗时${duration}ms)`);
+
+        // 释放锁
+        lock.release();
 
         res.json({
             success: true,
@@ -633,6 +680,12 @@ router.post('/bet', async (req, res) => {
 
     } catch (error) {
         console.error('[派对危机] 下注失败:', error);
+        
+        // 确保释放锁
+        if (lock && !lock.released) {
+            lock.release();
+        }
+        
         res.status(500).json({
             success: false,
             error: error.message
@@ -738,8 +791,44 @@ setInterval(() => {
     });
 }, 5 * 60 * 1000);
 
+// Bot 配置管理函数
+const getBotConfig = function() {
+    return {
+        botCountMin: GAME_CONFIG.BOT_COUNT_MIN,
+        botCountMax: GAME_CONFIG.BOT_COUNT_MAX,
+        roomBetMin: GAME_CONFIG.ROOM_BET_MIN,
+        roomBetMax: GAME_CONFIG.ROOM_BET_MAX,
+        botBetMin: GAME_CONFIG.BOT_BET_MIN,
+        botBetMax: GAME_CONFIG.BOT_BET_MAX
+    };
+};
+
+const updateBotConfig = function(newConfig) {
+    if (newConfig.botCountMin !== undefined) {
+        GAME_CONFIG.BOT_COUNT_MIN = newConfig.botCountMin;
+    }
+    if (newConfig.botCountMax !== undefined) {
+        GAME_CONFIG.BOT_COUNT_MAX = newConfig.botCountMax;
+    }
+    if (newConfig.roomBetMin !== undefined) {
+        GAME_CONFIG.ROOM_BET_MIN = newConfig.roomBetMin;
+    }
+    if (newConfig.roomBetMax !== undefined) {
+        GAME_CONFIG.ROOM_BET_MAX = newConfig.roomBetMax;
+    }
+    if (newConfig.botBetMin !== undefined) {
+        GAME_CONFIG.BOT_BET_MIN = newConfig.botBetMin;
+    }
+    if (newConfig.botBetMax !== undefined) {
+        GAME_CONFIG.BOT_BET_MAX = newConfig.botBetMax;
+    }
+    console.log('[Party Crisis] Bot配置已更新:', GAME_CONFIG);
+};
+
 module.exports = router;
 module.exports.games = games;
 module.exports.playerGames = playerGames;
 module.exports.globalHistory = globalHistory;
 module.exports.ROOMS = ROOMS;
+module.exports.getBotConfig = getBotConfig;
+module.exports.updateBotConfig = updateBotConfig;

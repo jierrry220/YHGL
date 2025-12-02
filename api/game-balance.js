@@ -4,11 +4,40 @@
  */
 
 const express = require('express');
+const rateLimit = require('express-rate-limit');
 const router = express.Router();
 const { gameBalanceManager } = require('../game-balance');
 
+// 配置 API 限流器
+// 提现接口的严格限流：每个 IP 每分钟最多 3 次请求
+const withdrawLimiter = rateLimit({
+    windowMs: 60 * 1000, // 1 分钟
+    max: 3, // 最多 3 次请求
+    message: {
+        success: false,
+        error: '请求过于频繁，请稍后再试'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
+// 其他接口的宽松限流：每个 IP 每分钟最多 30 次请求
+const generalLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 30,
+    message: {
+        success: false,
+        error: '请求过于频繁，请稍后再试'
+    },
+    standardHeaders: true,
+    legacyHeaders: false,
+});
+
 // 初始化余额管理器
 gameBalanceManager.init().catch(console.error);
+
+// 应用通用限流器到所有路由
+router.use(generalLimiter);
 
 // 主路由 - 根据 action 参数分发请求
 router.all('/', async (req, res) => {
@@ -81,13 +110,17 @@ async function handleGetBalance(req, res) {
         });
     }
 
-    const balance = gameBalanceManager.getBalance(address);
+    const totalBalance = gameBalanceManager.getBalance(address);
+    const frozenBalance = gameBalanceManager.getFrozenBalance(address);
+    const availableBalance = gameBalanceManager.getAvailableBalance(address);
 
     res.json({
         success: true,
         data: {
             address: address.toLowerCase(),
-            balance: balance
+            balance: totalBalance,  // 总余额（包含冻结）
+            frozenBalance: frozenBalance,  // 冻结余额
+            availableBalance: availableBalance  // 可用余额（总余额 - 冻结）
         }
     });
 }
@@ -151,6 +184,14 @@ async function handleWithdraw(req, res) {
         });
     }
 
+    // 应用严格的提现限流
+    await new Promise((resolve, reject) => {
+        withdrawLimiter(req, res, (err) => {
+            if (err) reject(err);
+            else resolve();
+        });
+    });
+
     try {
         const { address, amount } = req.body;
 
@@ -163,6 +204,19 @@ async function handleWithdraw(req, res) {
 
         const result = await gameBalanceManager.withdraw(address, amount);
 
+        // 如果需要人工审核，返回特殊状态
+        if (result.pending_review) {
+            return res.status(202).json({
+                success: false,
+                pending_review: true,
+                reviewId: result.reviewId,
+                reason: result.reason,
+                message: result.message,
+                data: result.transaction
+            });
+        }
+
+        // 成功提现
         res.json({
             success: true,
             data: result

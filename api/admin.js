@@ -8,6 +8,7 @@ const router = express.Router();
 const fs = require('fs').promises;
 const path = require('path');
 const { gameBalanceManager } = require('../game-balance');
+const { withdrawSecurityManager } = require('../withdraw-security');
 
 // 管理员密码（应该从环境变量读取）
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123456';
@@ -580,6 +581,302 @@ router.get('/config', verifyAdmin, (req, res) => {
         
     } catch (error) {
         console.error('[管理员] 获取配置失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ==================== 6. 提现安全管理 ====================
+
+/**
+ * GET /api/admin/withdraw-security/stats
+ * 获取提现安全统计
+ */
+router.get('/withdraw-security/stats', verifyAdmin, async (req, res) => {
+    try {
+        await withdrawSecurityManager.init();
+        const stats = withdrawSecurityManager.getAllStats();
+        
+        res.json({
+            success: true,
+            data: stats
+        });
+    } catch (error) {
+        console.error('[管理员] 获取提现安全统计失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/admin/withdraw-security/user-stats/:address
+ * 获取用户提现统计
+ */
+router.get('/withdraw-security/user-stats/:address', verifyAdmin, async (req, res) => {
+    try {
+        await withdrawSecurityManager.init();
+        const { address } = req.params;
+        const stats = withdrawSecurityManager.getUserStats(address);
+        
+        res.json({
+            success: true,
+            data: stats
+        });
+    } catch (error) {
+        console.error('[管理员] 获取用户提现统计失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/admin/withdraw-reviews
+ * 获取待审核提现列表
+ */
+router.get('/withdraw-reviews', verifyAdmin, async (req, res) => {
+    try {
+        await withdrawSecurityManager.init();
+        
+        const { status = 'pending' } = req.query;
+        const reviews = withdrawSecurityManager.getPendingReviews(status);
+        
+        // 丰富每条审核记录的用户信息
+        const enrichedReviews = reviews.map(review => {
+            const userInfo = gameBalanceManager.getUserInfo(review.address);
+            const balance = gameBalanceManager.getBalance(review.address);
+            
+            return {
+                ...review,
+                userInfo: userInfo,
+                currentBalance: balance
+            };
+        });
+        
+        res.json({
+            success: true,
+            data: {
+                reviews: enrichedReviews,
+                count: enrichedReviews.length
+            }
+        });
+    } catch (error) {
+        console.error('[管理员] 获取待审核提现列表失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * GET /api/admin/withdraw-reviews/:reviewId
+ * 获取单个审核记录详情
+ */
+router.get('/withdraw-reviews/:reviewId', verifyAdmin, async (req, res) => {
+    try {
+        await withdrawSecurityManager.init();
+        
+        const { reviewId } = req.params;
+        const review = withdrawSecurityManager.pendingReviews.find(r => r.id === reviewId);
+        
+        if (!review) {
+            return res.status(404).json({
+                success: false,
+                error: '审核记录不存在'
+            });
+        }
+        
+        // 获取用户详细信息
+        const userInfo = gameBalanceManager.getUserInfo(review.address);
+        const balance = gameBalanceManager.getBalance(review.address);
+        const transactions = gameBalanceManager.getTransactions(review.address, 50);
+        const userStats = withdrawSecurityManager.getUserStats(review.address);
+        
+        res.json({
+            success: true,
+            data: {
+                review: review,
+                userInfo: userInfo,
+                currentBalance: balance,
+                recentTransactions: transactions,
+                withdrawStats: userStats
+            }
+        });
+    } catch (error) {
+        console.error('[管理员] 获取审核记录详情失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * POST /api/admin/withdraw-reviews/:reviewId/approve
+ * 审核通过提现
+ */
+router.post('/withdraw-reviews/:reviewId/approve', verifyAdmin, async (req, res) => {
+    try {
+        await withdrawSecurityManager.init();
+        await gameBalanceManager.init();
+        
+        const { reviewId } = req.params;
+        const { note = '' } = req.body;
+        
+        // 1. 审核通过
+        const review = await withdrawSecurityManager.reviewWithdraw(reviewId, true, note, 'admin');
+        
+        // 2. 执行提现
+        const result = await gameBalanceManager.executeApprovedWithdraw(reviewId);
+        
+        res.json({
+            success: true,
+            message: '审核通过，提现已执行',
+            data: {
+                review: review,
+                withdraw: result
+            }
+        });
+    } catch (error) {
+        console.error('[管理员] 审核通过失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * POST /api/admin/withdraw-reviews/:reviewId/reject
+ * 审核拒绝提现
+ */
+router.post('/withdraw-reviews/:reviewId/reject', verifyAdmin, async (req, res) => {
+    try {
+        await withdrawSecurityManager.init();
+        await gameBalanceManager.init();
+        
+        const { reviewId } = req.params;
+        const { note = '' } = req.body;
+        
+        if (!note) {
+            return res.status(400).json({
+                success: false,
+                error: '拒绝提现必须提供原因'
+            });
+        }
+        
+        // 审核拒绝
+        const review = await withdrawSecurityManager.reviewWithdraw(reviewId, false, note, 'admin');
+        
+        // 方案3：解冻余额
+        await gameBalanceManager.unfreezeBalance(review.address, review.amount);
+        
+        // 更新交易状态
+        const transaction = gameBalanceManager.transactions.find(tx => tx.reviewId === reviewId);
+        if (transaction) {
+            transaction.status = 'rejected';
+            transaction.rejectedAt = Math.floor(Date.now() / 1000);
+            transaction.rejectReason = note;
+            transaction.frozen = false;
+            await gameBalanceManager.save();
+        }
+        
+        res.json({
+            success: true,
+            message: '审核拒绝，已通知用户',
+            data: {
+                review: review
+            }
+        });
+    } catch (error) {
+        console.error('[管理员] 审核拒绝失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// ==================== 7. Party Crisis Bot 配置管理 ====================
+
+/**
+ * GET /api/admin/party-crisis/bot-config
+ * 获取 Bot 配置
+ */
+router.get('/party-crisis/bot-config', verifyAdmin, (req, res) => {
+    try {
+        // 需要从 party-crisis.js 导入配置
+        const partyCrisis = require('./party-crisis');
+        const config = partyCrisis.getBotConfig();
+        
+        res.json({
+            success: true,
+            data: config
+        });
+    } catch (error) {
+        console.error('[管理员] 获取Bot配置失败:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+/**
+ * POST /api/admin/party-crisis/bot-config
+ * 更新 Bot 配置
+ */
+router.post('/party-crisis/bot-config', verifyAdmin, (req, res) => {
+    try {
+        const { botCountMin, botCountMax, roomBetMin, roomBetMax, botBetMin, botBetMax } = req.body;
+        
+        // 验证参数
+        if (botCountMin < 0 || botCountMax < botCountMin) {
+            return res.status(400).json({
+                success: false,
+                error: 'Bot数量范围不合法'
+            });
+        }
+        
+        if (roomBetMin < 0 || roomBetMax < roomBetMin) {
+            return res.status(400).json({
+                success: false,
+                error: '房间投注范围不合法'
+            });
+        }
+        
+        if (botBetMin < 0 || botBetMax < botBetMin) {
+            return res.status(400).json({
+                success: false,
+                error: '单个Bot投注额范围不合法'
+            });
+        }
+        
+        const partyCrisis = require('./party-crisis');
+        partyCrisis.updateBotConfig({
+            botCountMin: parseInt(botCountMin),
+            botCountMax: parseInt(botCountMax),
+            roomBetMin: parseInt(roomBetMin),
+            roomBetMax: parseInt(roomBetMax),
+            botBetMin: parseInt(botBetMin),
+            botBetMax: parseInt(botBetMax)
+        });
+        
+        console.log('[管理员] Bot配置已更新:', { botCountMin, botCountMax, roomBetMin, roomBetMax, botBetMin, botBetMax });
+        
+        res.json({
+            success: true,
+            message: 'Bot配置已更新，将在下局游戏生效',
+            data: partyCrisis.getBotConfig()
+        });
+    } catch (error) {
+        console.error('[管理员] 更新Bot配置失败:', error);
         res.status(500).json({
             success: false,
             error: error.message
