@@ -167,7 +167,8 @@ class WithdrawSecurityManager {
                 const remainingSeconds = Math.ceil((SECURITY_CONFIG.WITHDRAW_COOLDOWN - timeSinceLastWithdraw) / 1000);
                 return {
                     allowed: false,
-                    reason: `提现冷却中，请等待 ${remainingSeconds} 秒后重试`,
+                    // 文案交给前端通过 i18n 显示，这里只返回机器可读的代码
+                    reason: `withdraw_cooldown:${remainingSeconds}`,
                     needsReview: false
                 };
             }
